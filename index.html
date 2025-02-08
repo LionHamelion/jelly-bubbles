@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <title>Amorphous Jelly Balls with Gravity and Smooth Cubic-Bezier Inflation</title>
+  <style>
+    /* Fullscreen canvas styling */
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #222;
+      height: 100%;
+    }
+    canvas {
+      display: block;
+      background: #333;
+    }
+  </style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+// Code comments in English per user's instructions.
+// The text instructions will be in Ukrainian.
+
+// Suppose we have an array of texture paths in the 'profiles' folder:
+// profiles/profile1.jpg, profiles/profile2.jpg, etc.
+// In a real scenario, you'd generate or fetch them dynamically.
+// But for demonstration, let's just define them manually:
+
+const texturePaths = [
+  'profiles/1.jpg',
+  'profiles/2.jpg',
+  'profiles/3.jpg',
+  'profiles/4.jpg',
+  'profiles/5.jpg',
+  'profiles/6.jpg',
+  'profiles/7.jpg',
+  'profiles/8.jpg',
+  'profiles/9.jpg',
+  'profiles/10.jpg',
+  'profiles/11.jpg',
+  'profiles/12.jpg',
+];
+let currentTextureIndex = 0; // Tracks which texture is next
+
+// -----------------------------------------------------------------------------
+// 1. Utility functions
+// -----------------------------------------------------------------------------
+
+// Returns random number between [min, max).
+function rand(min, max) {
+  return Math.random() * (max - min) + min;
+}
+
+// A standard 2D cubic-bezier in [0..1], from (0,0) to (1,1) with control points
+// (x1, y1) and (x2, y2). For a parameter t in [0..1], it returns the y component.
+function cubicBezierY(t, x1, y1, x2, y2) {
+  const oneMinusT = (1 - t);
+  const y = 3 * oneMinusT * oneMinusT * t * y1
+          + 3 * oneMinusT * t * t * y2
+          + t * t * t;
+  return y;
+}
+
+function cubicBezierCustom(t) {
+  // p1=(0.55, -0.26), p2=(0.6,1.61)
+  return cubicBezierY(t, 0.55, -0.26, 0.6, 1.61);
+}
+
+// Compute the effective radius of a jelly ball along a given angle (for collision).
+function getEffectiveRadius(ball, angle) {
+  let bestIndex = 0;
+  let bestDiff = Infinity;
+  for (let i = 0; i < ball.numPoints; i++) {
+    let diff = Math.abs(ball.points[i].angle - angle);
+    diff = Math.min(diff, Math.PI * 2 - diff);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      bestIndex = i;
+    }
+  }
+  return ball.radius + ball.points[bestIndex].d;
+}
+
+// -----------------------------------------------------------------------------
+// 2. JellyBall class
+// -----------------------------------------------------------------------------
+
+class JellyBall {
+  // Now we pass texturePath in the constructor
+  constructor(x, y, targetRadius, texturePath, numPoints = 40) {
+    this.x = x;
+    this.y = y;
+    // Start from radius=1 and inflate to targetRadius with the cubic-bezier
+    this.radius = 1;           // start
+    this.targetRadius = targetRadius; // end
+    this.inflationTime = 20.0;  // total time (seconds) to fully inflate
+    this.age = 0;              // how long we've been alive (for inflation calc)
+
+    // Center velocities
+    this.vx = rand(-2, 2);
+    this.vy = rand(-2, 2);
+
+    // mass ~ area => updated each frame as radius changes
+    this.mass = 1;
+
+    this.numPoints = numPoints;
+    // Each contour point
+    this.points = [];
+    for (let i = 0; i < numPoints; i++) {
+      let angle = i * (Math.PI * 2 / numPoints);
+      this.points.push({ angle: angle, d: 0, dv: 0 });
+    }
+    // Spring physics
+    this.kRest = 0.03;
+    this.kNeighbor = 1.1;
+    this.damping = 0.75;
+
+    // Generate a random outline color
+    const hue = rand(0, 360);
+    this.strokeColor = `hsl(${hue}, 80%, 50%)`;
+
+    // Create our own texture image
+    this.texture = new Image();
+    this.texture.src = texturePath;
+  }
+
+  update(dt) {
+    // 1) Update age, compute fraction in [0..1]
+    this.age += dt;
+    let t = this.age / this.inflationTime;
+    if (t > 1) t = 1;
+
+    // 2) Apply cubic-bezier to get eased radius factor in [0..1]
+    let eased = cubicBezierCustom(t);
+    this.radius = 1 + (this.targetRadius - 1) * eased;
+    // Recalc mass ~ radius^2
+    this.mass = this.radius * this.radius;
+
+    // 3) Spring update for contour
+    for (let i = 0; i < this.numPoints; i++) {
+      let p = this.points[i];
+      let pPrev = this.points[(i - 1 + this.numPoints) % this.numPoints];
+      let pNext = this.points[(i + 1) % this.numPoints];
+      let force = -this.kRest * p.d;
+      force += this.kNeighbor * (pPrev.d + pNext.d - 2 * p.d);
+      p.dv += force * dt;
+      p.dv *= this.damping;
+      p.d += p.dv * dt;
+      // clamp
+      p.d = Math.max(Math.min(p.d, this.radius * 0.5), -this.radius * 0.5);
+    }
+  }
+
+  applyForceAt(impactAngle, force) {
+    impactAngle = (impactAngle % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+    let bestIndex = 0;
+    let bestDiff = Infinity;
+    for (let i = 0; i < this.numPoints; i++) {
+      let diff = Math.abs(this.points[i].angle - impactAngle);
+      diff = Math.min(diff, Math.PI * 2 - diff);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestIndex = i;
+      }
+    }
+    this.points[bestIndex].dv += force / this.radius;
+    // Distribute portion
+    let neighborForce = (force * 0.5) / this.radius;
+    let idxPrev = (bestIndex - 1 + this.numPoints) % this.numPoints;
+    let idxNext = (bestIndex + 1) % this.numPoints;
+    this.points[idxPrev].dv += neighborForce;
+    this.points[idxNext].dv += neighborForce;
+  }
+
+  draw(ctx) {
+    // We draw the shape path of the ball.
+    ctx.save();
+    ctx.beginPath();
+    for (let i = 0; i < this.numPoints; i++) {
+      let p = this.points[i];
+      let r = this.radius + p.d;
+      let px = this.x + r * Math.cos(p.angle);
+      let py = this.y + r * Math.sin(p.angle);
+      if (i === 0) {
+        ctx.moveTo(px, py);
+      } else {
+        ctx.lineTo(px, py);
+      }
+    }
+    ctx.closePath();
+
+    // Use this path as a clipping region.
+    ctx.save();
+    ctx.clip();
+
+    // Draw the texture image if loaded
+    if (this.texture.complete) {
+      const size = this.radius * 2;
+      ctx.drawImage(
+        this.texture,
+        this.x - this.radius,
+        this.y - this.radius,
+        size,
+        size
+      );
+    }
+
+    ctx.restore();
+
+    // Now we apply a stroke with a random color.
+    ctx.strokeStyle = this.strokeColor;
+    ctx.lineWidth = 4;
+    ctx.stroke();
+
+    ctx.restore();
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 3. PhysicsEngine
+// -----------------------------------------------------------------------------
+
+class PhysicsEngine {
+  constructor(canvas, numBalls = 5) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.balls = [];
+
+    // Spawn initial set (if we want some initial balls with the first textures)
+    // We can either limit ourselves to the available textures or just spawn numBalls.
+    for (let i = 0; i < numBalls; i++) {
+      // If we have a texture available, use it; otherwise, don't spawn.
+      if (currentTextureIndex < texturePaths.length) {
+        let r = rand(30, 60);
+        let x = rand(r, canvas.width - r);
+        let y = rand(r, canvas.height - r);
+        const path = texturePaths[currentTextureIndex++];
+        this.balls.push(new JellyBall(x, y, r, path, 40));
+      } else {
+        // No more textures left
+        break;
+      }
+    }
+
+    this.lastTime = 0;
+
+    // Basic physics params
+    this.centerDamping = 0.994;
+    this.collisionDeformationFactor = 0.02;
+    this.mouseImpulseFactor = 0.2;
+
+    // Gravity
+    this.G = 0.4;
+    this.maxGravForce = 50;
+
+    // Mouse / dragging
+    this.mouseX = 0;
+    this.mouseY = 0;
+    this.draggedBall = null;
+    this.dragStart = { x: 0, y: 0 };
+    this.dragCurrent = { x: 0, y: 0 };
+
+    this.resize();
+    window.addEventListener('resize', () => this.resize());
+    this.initMouseEvents();
+    this.initKeyEvents();
+
+    requestAnimationFrame((timestamp) => this.loop(timestamp));
+  }
+
+  resize() {
+    this.canvas.width = window.innerWidth;
+    this.canvas.height = window.innerHeight;
+  }
+
+  initMouseEvents() {
+    this.canvas.addEventListener('mousemove', (e) => {
+      const rect = this.canvas.getBoundingClientRect();
+      this.mouseX = e.clientX - rect.left;
+      this.mouseY = e.clientY - rect.top;
+
+      if (this.draggedBall) {
+        this.dragCurrent.x = this.mouseX;
+        this.dragCurrent.y = this.mouseY;
+      }
+    });
+
+    this.canvas.addEventListener('mousedown', (e) => {
+      const rect = this.canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      for (let ball of this.balls) {
+        let dx = mx - ball.x;
+        let dy = my - ball.y;
+        if (dx * dx + dy * dy <= ball.radius * ball.radius) {
+          this.draggedBall = ball;
+          this.dragStart = { x: mx, y: my };
+          this.dragCurrent = { x: mx, y: my };
+          break;
+        }
+      }
+    });
+
+    this.canvas.addEventListener('mouseup', () => {
+      if (this.draggedBall) {
+        const dx = this.dragCurrent.x - this.dragStart.x;
+        const dy = this.dragCurrent.y - this.dragStart.y;
+        this.draggedBall.vx += dx * this.mouseImpulseFactor;
+        this.draggedBall.vy += dy * this.mouseImpulseFactor;
+        // Deformation
+        const angle = Math.atan2(dy, dx);
+        this.draggedBall.applyForceAt(angle, dx * this.mouseImpulseFactor * 10);
+        this.draggedBall = null;
+      }
+    });
+  }
+
+  // Spawns a new ball at cursor, inflating with cubic-bezier
+  initKeyEvents() {
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Space') {
+        this.spawnNewBallAtCursor();
+      }
+    });
+  }
+
+  spawnNewBallAtCursor() {
+    // Only spawn if we still have a texture left
+    if (currentTextureIndex >= texturePaths.length) {
+      // If no textures left, do nothing
+      return;
+    }
+    let r = rand(60, 70);
+    let path = texturePaths[currentTextureIndex++];
+    let newBall = new JellyBall(this.mouseX, this.mouseY, r, path, 40);
+    newBall.vx = rand(-1, 1);
+    newBall.vy = rand(-1, 1);
+    this.balls.push(newBall);
+  }
+
+  loop(timestamp) {
+    const dt = (timestamp - this.lastTime) * 0.06 || 1;
+    this.lastTime = timestamp;
+    this.update(dt);
+    this.render();
+    requestAnimationFrame((ts) => this.loop(ts));
+  }
+
+  update(dt) {
+    // 1) Update + move
+    for (let ball of this.balls) {
+      ball.update(dt);
+      ball.x += ball.vx * dt;
+      ball.y += ball.vy * dt;
+    }
+
+    // 2) Gravity between pairs
+    for (let i = 0; i < this.balls.length; i++) {
+      for (let j = i + 1; j < this.balls.length; j++) {
+        let A = this.balls[i];
+        let B = this.balls[j];
+        let dx = B.x - A.x;
+        let dy = B.y - A.y;
+        let dist = Math.hypot(dx, dy);
+        if (dist === 0) continue;
+
+        let force = this.G * (A.mass * B.mass) / (dist * dist);
+        if (force > this.maxGravForce) {
+          force = this.maxGravForce;
+        }
+        let nx = dx / dist;
+        let ny = dy / dist;
+        A.vx += (force / A.mass) * nx * dt;
+        A.vy += (force / A.mass) * ny * dt;
+        B.vx -= (force / B.mass) * nx * dt;
+        B.vy -= (force / B.mass) * ny * dt;
+      }
+    }
+
+    // 3) Collide with walls
+    for (let ball of this.balls) {
+      if (ball.x + ball.radius > this.canvas.width) {
+        ball.x = this.canvas.width - ball.radius;
+        ball.vx *= -1;
+      } else if (ball.x - ball.radius < 0) {
+        ball.x = ball.radius;
+        ball.vx *= -1;
+      }
+      if (ball.y + ball.radius > this.canvas.height) {
+        ball.y = this.canvas.height - ball.radius;
+        ball.vy *= -1;
+      } else if (ball.y - ball.radius < 0) {
+        ball.y = ball.radius;
+        ball.vy *= -1;
+      }
+    }
+
+    // 4) Collisions between balls
+    for (let i = 0; i < this.balls.length; i++) {
+      for (let j = i + 1; j < this.balls.length; j++) {
+        let A = this.balls[i];
+        let B = this.balls[j];
+        let dx = B.x - A.x;
+        let dy = B.y - A.y;
+        let dist = Math.hypot(dx, dy);
+        if (dist === 0) continue;
+        let nx = dx / dist;
+        let ny = dy / dist;
+        let angle = Math.atan2(dy, dx);
+
+        let effA = getEffectiveRadius(A, angle);
+        let effB = getEffectiveRadius(B, angle + Math.PI);
+        let minDist = effA + effB;
+        if (dist < minDist) {
+          let overlap = (minDist - dist) / 2;
+          A.x -= overlap * nx;
+          A.y -= overlap * ny;
+          B.x += overlap * nx;
+          B.y += overlap * ny;
+
+          let relVel = (B.vx - A.vx) * nx + (B.vy - A.vy) * ny;
+          if (relVel < 0) {
+            let restitution = 0.1;
+            let impulseMag = -(1 + restitution) * relVel / (1 / A.mass + 1 / B.mass);
+            const velocityScale = 0.2;
+            A.vx -= velocityScale * (impulseMag / A.mass) * nx;
+            A.vy -= velocityScale * (impulseMag / A.mass) * ny;
+            B.vx += velocityScale * (impulseMag / B.mass) * nx;
+            B.vy += velocityScale * (impulseMag / B.mass) * ny;
+
+            // Deform
+            A.applyForceAt(angle, -impulseMag * this.collisionDeformationFactor);
+            B.applyForceAt(angle + Math.PI, -impulseMag * this.collisionDeformationFactor);
+          }
+        }
+      }
+    }
+
+    // 5) Damping
+    for (let ball of this.balls) {
+      ball.vx *= this.centerDamping;
+      ball.vy *= this.centerDamping;
+    }
+  }
+
+  render() {
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    for (let ball of this.balls) {
+      ball.draw(this.ctx);
+    }
+    // drag line
+    if (this.draggedBall) {
+      this.ctx.beginPath();
+      this.ctx.moveTo(this.draggedBall.x, this.draggedBall.y);
+      this.ctx.lineTo(this.dragCurrent.x, this.dragCurrent.y);
+      this.ctx.strokeStyle = 'white';
+      this.ctx.lineWidth = 2;
+      this.ctx.stroke();
+    }
+  }
+}
+
+// Init
+document.addEventListener('DOMContentLoaded', () => {
+  const canvas = document.getElementById('canvas');
+  // pass 0 if we don't want to spawn anything initially,
+  // or pass 2,3,... if we want some initial bubbles.
+  new PhysicsEngine(canvas, 0);
+});
+</script>
+</body>
+</html>
